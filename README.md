@@ -66,7 +66,7 @@ npm run dev
 3. 构建命令：
 
 ```bash
-npm run build
+npm install && npm run build
 ```
 
 4. 输出目录：
