@@ -1,17 +1,17 @@
 # 点菜网页
 
-一个面向两个人一对一使用的点菜网页：客户浏览并下单，管理员维护菜品并实时收到新订单提醒。
+一个面向两个人一对一使用的点菜网页：客户浏览并下单，管理员维护菜品并收到新订单提醒。项目已迁移到腾讯云 CloudBase，适合国内公网访问。
 
 ## 功能
 
 - 客户页：菜品搜索、分类筛选、排序、数量选择、备注、下单。
-- 管理后台：Supabase 邮箱密码登录，新增、编辑、删除、上下架菜品，上传图片。
-- 订单：数据库端生成价格快照和总价，后台实时显示新单，可标记已处理。
-- 提醒：后台点击“启用提醒音”后，新订单会播放提示音并显示消息。
+- 管理后台：CloudBase 邮箱密码登录，新增、编辑、删除、上下架菜品，上传图片。
+- 订单：保存菜品快照、数量、小计和总价，后台可标记“已处理”。
+- 提醒：后台点击“启用提醒音”后，会每 8 秒检查新订单，有新单时播放提示音并显示消息。
 
 ## 本地运行
 
-1. 安装 Node.js 18 或更高版本。
+1. 安装 Node.js 18 或更高版本，推荐 Node.js LTS。
 2. 安装依赖：
 
 ```bash
@@ -30,11 +30,10 @@ Windows PowerShell 可使用：
 Copy-Item .env.example .env
 ```
 
-4. 在 `.env` 中填写：
+4. 在 `.env` 中填写 CloudBase 环境 ID：
 
-```bash
-VITE_SUPABASE_URL=你的 Supabase Project URL
-VITE_SUPABASE_ANON_KEY=你的 Supabase anon key
+```env
+VITE_CLOUDBASE_ENV_ID=你的CloudBase环境ID
 ```
 
 5. 启动：
@@ -43,32 +42,49 @@ VITE_SUPABASE_ANON_KEY=你的 Supabase anon key
 npm run dev
 ```
 
-## Supabase 配置
+## CloudBase 配置
 
-1. 新建 Supabase 项目。
-2. 在 SQL Editor 中执行 `supabase/schema.sql`。
-3. 在 Authentication 中创建你的管理员邮箱和密码。
-4. 建议关闭公开注册，只保留你自己的管理员账号。
-5. 确认 `dish-images` bucket 已创建且为 public。
-6. Realtime 需要包含 `orders` 表；SQL 脚本最后一行已尝试加入 publication。
+详细配置见 [cloudbase/README.md](cloudbase/README.md)。
+
+需要完成：
+
+- 创建 CloudBase 环境。
+- 开启邮箱密码登录，并创建管理员账号。
+- 创建 `dishes` 和 `orders` 数据库集合。
+- 开启云存储，用于菜品图片。
+- 配置集合权限：客户可读菜品和创建订单，管理员登录后可管理菜品和订单。
 
 ## 页面地址
 
 - 客户点菜页：`/`
 - 管理后台：`/#admin`
 
-## 部署到 Vercel
+## 部署到 CloudBase Web 应用托管
 
-1. 将项目推送到 Git 仓库。
-2. 在 Vercel 导入项目。
-3. 添加环境变量：
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_ANON_KEY`
-4. Build Command 使用 `npm run build`。
-5. Output Directory 使用 `dist`。
+1. 将项目上传到 Git 仓库，或使用 CloudBase 控制台支持的上传/导入方式。
+2. 在 CloudBase Web 应用托管中创建应用。
+3. 构建命令：
+
+```bash
+npm run build
+```
+
+4. 输出目录：
+
+```text
+dist
+```
+
+5. 添加环境变量：
+
+```env
+VITE_CLOUDBASE_ENV_ID=你的CloudBase环境ID
+```
+
+部署完成后，客户打开 CloudBase 提供的公网地址 `/`，你打开 `/#admin`。
 
 ## 注意
 
-- 客户无需登录，因此任何知道客户页地址的人都可以提交订单；这符合一对一轻量场景。
-- 后台必须保持打开，且浏览器允许音频播放，才能听到实时提示音。
-- 如果未来需要微信、短信或邮件提醒，可以在 Supabase Edge Function 或第三方自动化服务中基于新订单事件扩展。
+- 这一版采用前端直连 CloudBase 数据库，适合轻量一对一使用。
+- 后台页面必须保持打开，并点击一次“启用提醒音”，才能听到新订单提示音。
+- 如果以后要防止客户篡改价格或做微信/短信提醒，建议增加 CloudBase 云函数来统一创建订单和推送通知。

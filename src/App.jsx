@@ -16,7 +16,14 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { isSupabaseConfigured, supabase } from "./lib/supabase";
+import {
+  auth,
+  cloudbaseApp,
+  db,
+  ensureAnonymousSession,
+  isCloudBaseConfigured,
+  toDocId,
+} from "./lib/cloudbase";
 
 const emptyDish = {
   name: "",
@@ -35,6 +42,22 @@ const sortOptions = [
 
 function formatMoney(value) {
   return `¥${Number(value || 0).toFixed(2)}`;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeDish(dish) {
+  return { ...dish, id: toDocId(dish) };
+}
+
+function normalizeOrder(order) {
+  return { ...order, id: toDocId(order), order_items: order.items || [] };
+}
+
+function isEmailLoginState(loginState) {
+  return Boolean(loginState?.user?.email || loginState?.user?.emailVerified);
 }
 
 function createUploadId() {
@@ -56,7 +79,7 @@ function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  if (!isSupabaseConfigured) {
+  if (!isCloudBaseConfigured) {
     return (
       <main className="setup-screen">
         <div>
@@ -64,7 +87,7 @@ function App() {
           <h1>点菜网页</h1>
           <p>
             请先复制 <code>.env.example</code> 为 <code>.env</code>，填写
-            Supabase 项目的 URL 和 anon key，然后重启开发服务器。
+            CloudBase 环境 ID，然后重启开发服务器。
           </p>
         </div>
       </main>
@@ -117,15 +140,16 @@ function CustomerApp() {
 
   async function loadDishes() {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("dishes")
-      .select("*")
-      .eq("is_available", true)
-      .order("created_at", { ascending: false });
-    if (error) {
+    try {
+      await ensureAnonymousSession();
+      const { data } = await db
+        .collection("dishes")
+        .where({ is_available: true })
+        .orderBy("created_at", "desc")
+        .get();
+      setDishes((data || []).map(normalizeDish));
+    } catch (error) {
       setNotice(error.message);
-    } else {
-      setDishes(data || []);
     }
     setLoading(false);
   }
@@ -184,20 +208,28 @@ function CustomerApp() {
     if (!cartItems.length) return;
     setSubmitting(true);
     setNotice("");
-    const payload = cartItems.map((item) => ({
-      dish_id: item.id,
-      quantity: item.quantity,
-    }));
-    const { error } = await supabase.rpc("create_order", {
-      p_remark: remark.trim() || null,
-      p_items: payload,
-    });
-    if (error) {
-      setNotice(error.message);
-    } else {
+    try {
+      await ensureAnonymousSession();
+      const items = cartItems.map((item) => ({
+        dish_id: item.id,
+        dish_name: item.name,
+        unit_price: Number(item.price),
+        quantity: item.quantity,
+        subtotal: Number((Number(item.price) * item.quantity).toFixed(2)),
+      }));
+      await db.collection("orders").add({
+        remark: remark.trim() || "",
+        total_amount: Number(total.toFixed(2)),
+        status: "new",
+        items,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      });
       setCart({});
       setRemark("");
       setNotice("已下单，对方会收到提醒。");
+    } catch (error) {
+      setNotice(error.message);
     }
     setSubmitting(false);
   }
@@ -347,21 +379,21 @@ function AdminApp() {
   const [authError, setAuthError] = useState("");
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
+    auth.getLoginState().then((loginState) => {
+      setSession(isEmailLoginState(loginState) ? loginState : null);
     });
-    return () => data.subscription.unsubscribe();
   }, []);
 
   async function signIn(event) {
     event.preventDefault();
     setAuthError("");
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    if (error) setAuthError(error.message);
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+      const loginState = await auth.getLoginState();
+      setSession(loginState || { email });
+    } catch (error) {
+      setAuthError(error.message);
+    }
   }
 
   if (!session) {
@@ -412,51 +444,45 @@ function AdminDashboard() {
 
   useEffect(() => {
     loadAdminData();
-    const channel = supabase
-      .channel("admin-orders")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "orders" },
-        async (payload) => {
-          const nextOrder = await fetchOrder(payload.new.id);
-          if (nextOrder) {
-            setOrders((current) => [nextOrder, ...current]);
-            setMessage(`收到新订单：${formatMoney(nextOrder.total_amount)}`);
-            playNotification();
-          }
-        }
-      )
-      .subscribe();
-    return () => supabase.removeChannel(channel);
+    const timer = window.setInterval(checkForNewOrders, 8000);
+    return () => window.clearInterval(timer);
   }, []);
 
   async function loadAdminData() {
-    const [dishResult, orderResult] = await Promise.all([
-      supabase.from("dishes").select("*").order("created_at", {
-        ascending: false,
-      }),
-      supabase
-        .from("orders")
-        .select("*, order_items(*)")
-        .order("created_at", { ascending: false }),
-    ]);
-    if (dishResult.error) setMessage(dishResult.error.message);
-    else setDishes(dishResult.data || []);
-    if (orderResult.error) setMessage(orderResult.error.message);
-    else setOrders(orderResult.data || []);
+    try {
+      const [dishResult, orderResult] = await Promise.all([
+        db.collection("dishes").orderBy("created_at", "desc").get(),
+        db.collection("orders").orderBy("created_at", "desc").limit(50).get(),
+      ]);
+      setDishes((dishResult.data || []).map(normalizeDish));
+      setOrders((orderResult.data || []).map(normalizeOrder));
+    } catch (error) {
+      setMessage(error.message);
+    }
   }
 
-  async function fetchOrder(orderId) {
-    const { data, error } = await supabase
-      .from("orders")
-      .select("*, order_items(*)")
-      .eq("id", orderId)
-      .single();
-    if (error) {
+  async function checkForNewOrders() {
+    try {
+      const { data } = await db
+        .collection("orders")
+        .orderBy("created_at", "desc")
+        .limit(10)
+        .get();
+      const latestNewOrders = (data || []).map(normalizeOrder);
+      setOrders((current) => {
+        const known = new Set(current.map((order) => order.id));
+        const incoming = latestNewOrders.filter((order) => !known.has(order.id));
+        if (incoming.length) {
+          setMessage(`收到新订单：${formatMoney(incoming[0].total_amount)}`);
+          playNotification();
+        }
+        return [...incoming, ...current].sort(
+          (a, b) => new Date(b.created_at) - new Date(a.created_at)
+        );
+      });
+    } catch (error) {
       setMessage(error.message);
-      return null;
     }
-    return data;
   }
 
   function enableSound() {
@@ -501,13 +527,16 @@ function AdminDashboard() {
   async function uploadImage() {
     if (!imageFile) return form.image_url || null;
     const extension = imageFile.name.split(".").pop() || "jpg";
-    const path = `${createUploadId()}.${extension}`;
-    const { error } = await supabase.storage
-      .from("dish-images")
-      .upload(path, imageFile, { upsert: false });
-    if (error) throw error;
-    const { data } = supabase.storage.from("dish-images").getPublicUrl(path);
-    return data.publicUrl;
+    const cloudPath = `dish-images/${createUploadId()}.${extension}`;
+    const uploadResult = await cloudbaseApp.uploadFile({
+      cloudPath,
+      filePath: imageFile,
+    });
+    const fileId = uploadResult.fileID;
+    const urlResult = await cloudbaseApp.getTempFileURL({
+      fileList: [fileId],
+    });
+    return urlResult.fileList?.[0]?.tempFileURL || fileId;
   }
 
   async function saveDish(event) {
@@ -521,12 +550,16 @@ function AdminDashboard() {
         price: Number(form.price),
         image_url: imageUrl,
         is_available: form.is_available,
+        updated_at: nowIso(),
       };
-      const query = editingId
-        ? supabase.from("dishes").update(payload).eq("id", editingId)
-        : supabase.from("dishes").insert(payload);
-      const { error } = await query;
-      if (error) throw error;
+      if (editingId) {
+        await db.collection("dishes").doc(editingId).update(payload);
+      } else {
+        await db.collection("dishes").add({
+          ...payload,
+          created_at: nowIso(),
+        });
+      }
       setMessage(editingId ? "菜品已更新" : "菜品已新增");
       resetForm();
       loadAdminData();
@@ -536,34 +569,42 @@ function AdminDashboard() {
   }
 
   async function deleteDish(dishId) {
-    const { error } = await supabase.from("dishes").delete().eq("id", dishId);
-    if (error) setMessage(error.message);
-    else {
+    try {
+      await db.collection("dishes").doc(dishId).remove();
       setMessage("菜品已删除");
       loadAdminData();
+    } catch (error) {
+      setMessage(error.message);
     }
   }
 
   async function toggleDish(dish) {
-    const { error } = await supabase
-      .from("dishes")
-      .update({ is_available: !dish.is_available })
-      .eq("id", dish.id);
-    if (error) setMessage(error.message);
-    else loadAdminData();
+    try {
+      await db.collection("dishes").doc(dish.id).update({
+        is_available: !dish.is_available,
+        updated_at: nowIso(),
+      });
+      loadAdminData();
+    } catch (error) {
+      setMessage(error.message);
+    }
   }
 
   async function markHandled(orderId) {
-    const { error } = await supabase
-      .from("orders")
-      .update({ status: "handled" })
-      .eq("id", orderId);
-    if (error) setMessage(error.message);
-    else loadAdminData();
+    try {
+      await db.collection("orders").doc(orderId).update({
+        status: "handled",
+        updated_at: nowIso(),
+      });
+      loadAdminData();
+    } catch (error) {
+      setMessage(error.message);
+    }
   }
 
   async function signOut() {
-    await supabase.auth.signOut();
+    await auth.signOut();
+    window.location.reload();
   }
 
   return (
